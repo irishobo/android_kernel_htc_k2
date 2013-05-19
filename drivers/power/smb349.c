@@ -243,8 +243,8 @@ static int set_reg(void *data, u64 val)
 static int get_reg(void *data, u64 *val)
 {
 	int addr = (int)data;
-	int ret;
-	u8 temp;
+	int ret = 0;
+	u8 temp = 0;
 
 	ret = smb349_read_reg(the_smb349_chg->client, addr, &temp);
 	if (ret) {

@@ -497,7 +497,7 @@ htc_rt_attrs_failed:
 		device_remove_file(dev, &htc_battery_rt_attrs[k]);
 htc_delta_attrs_failed:
 	while (j--)
-		device_remove_file(dev, &htc_set_delta_attrs[i]);
+		device_remove_file(dev, &htc_set_delta_attrs[j]);
 htc_attrs_failed:
 	while (i--)
 		device_remove_file(dev, &htc_battery_attrs[i]);
