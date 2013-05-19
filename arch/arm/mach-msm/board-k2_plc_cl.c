@@ -2229,7 +2229,7 @@ static struct attribute_group syn_properties_attr_group = {
 
 static void syn_init_vkeys_k2(void)
 {
-	int rc;
+	int rc = 0;
 	static struct kobject *syn_properties_kobj;
 
 	syn_properties_kobj = kobject_create_and_add("board_properties", NULL);
