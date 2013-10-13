@@ -1,0 +1,753 @@
+From d0b7724b68bb7ccfccb7a70fa39246f8bcc90f27 Mon Sep 17 00:00:00 2001
+From: James Taylor <jmztaylor@gmail.com>
+Date: Mon, 8 Jul 2013 15:35:12 -0400
+Subject: [PATCH] Sweep2Wake
+
+---
+ arch/arm/configs/k2_cl_defconfig           |   3 +
+ drivers/input/Kconfig                      |  14 +
+ drivers/input/keyboard/gpio_keys.c         |  12 +-
+ drivers/input/misc/gpio_event.c            |  10 +
+ drivers/input/touchscreen/synaptics_3200.c | 482 +++++++++++++++++++++++++++++
+ include/linux/synaptics_i2c_rmi.h          |   8 +
+ 6 files changed, 528 insertions(+), 1 deletion(-)
+
+diff --git a/arch/arm/configs/k2_cl_defconfig b/arch/arm/configs/k2_cl_defconfig
+index 04f030d..385c731 100644
+--- a/arch/arm/configs/k2_cl_defconfig
++++ b/arch/arm/configs/k2_cl_defconfig
+@@ -386,6 +386,9 @@ CONFIG_INPUT_TOUCHSCREEN=y
+ # CONFIG_TOUCHSCREEN_CYTTSP_I2C_QC is not set
+ # CONFIG_TOUCHSCREEN_CYTTSP_I2C is not set
+ CONFIG_TOUCHSCREEN_SYNAPTICS_3K=y
++CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE=y
++CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_START="BACK"
++CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_END="MENU"
+ CONFIG_INPUT_MISC=y
+ # CONFIG_INPUT_PMIC8XXX_PWRKEY is not set
+ CONFIG_INPUT_UINPUT=y
+diff --git a/drivers/input/Kconfig b/drivers/input/Kconfig
+index 69d3686..85b190f 100644
+--- a/drivers/input/Kconfig
++++ b/drivers/input/Kconfig
+@@ -174,6 +174,20 @@ config INPUT_KEYRESET
+ 	  To compile this driver as a module, choose M here: the
+ 	  module will be called keyreset.
+ 
++config TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        tristate "Sweep2Wake for SYNAPTICS_3k based touchscreens"
++        default y
++          
++config TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_START
++  	depends on TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        string "Sweep2Wake start button name"
++        default "BACK"
++
++config TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_END
++        depends on TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        string "Sweep2Wake end button name"
++        default "MENU"
++
+ comment "Input Device Drivers"
+ 
+ source "drivers/input/keyboard/Kconfig"
+diff --git a/drivers/input/keyboard/gpio_keys.c b/drivers/input/keyboard/gpio_keys.c
+index 735719c..09d2830 100644
+--- a/drivers/input/keyboard/gpio_keys.c
++++ b/drivers/input/keyboard/gpio_keys.c
+@@ -29,6 +29,10 @@
+ #include <linux/of_platform.h>
+ #include <linux/of_gpio.h>
+ #include <linux/spinlock.h>
++#include <linux/wakelock.h>
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++#include <linux/synaptics_i2c_rmi.h>
++#endif
+ 
+ struct gpio_button_data {
+ 	const struct gpio_keys_button *button;
+@@ -593,7 +597,13 @@ static int __devinit gpio_keys_probe(struct platform_device *pdev)
+ 	input->id.product = 0x0001;
+ 	input->id.version = 0x0100;
+ 
+-	
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++  if (!strcmp(input->name, "gpio-keys")) {
++    sweep2wake_setdev(input);
++    printk(KERN_INFO "[sweep2wake]: set device %s\n", input->name);
++  }
++#endif
++
+ 	if (pdata->rep)
+ 		__set_bit(EV_REP, input->evbit);
+ 
+diff --git a/drivers/input/misc/gpio_event.c b/drivers/input/misc/gpio_event.c
+index 5d04adb..0598a6f 100644
+--- a/drivers/input/misc/gpio_event.c
++++ b/drivers/input/misc/gpio_event.c
+@@ -1,5 +1,6 @@
+ /* drivers/input/misc/gpio_event.c
+  *
++ * Modified by Zarboz
+  * Copyright (C) 2007 Google, Inc.
+  *
+  * This software is licensed under the terms of the GNU General Public
+@@ -21,6 +22,9 @@
+ #include <linux/platform_device.h>
+ #include <linux/slab.h>
+ #include <mach/board_htc.h>
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++#include <linux/synaptics_i2c_rmi.h>
++#endif
+ 
+ struct gpio_event {
+ 	struct gpio_event_input_devs *input_devs;
+@@ -177,6 +181,12 @@ static int gpio_event_probe(struct platform_device *pdev)
+ 					event_info->name : event_info->names[i];
+ 		input_dev->event = gpio_input_event;
+ 		ip->input_devs->dev[i] = input_dev;
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++    if (!strcmp(input_dev->name, "k2_cl-keypad")) {
++      sweep2wake_setdev(input_dev);
++      printk(KERN_INFO "[sweep2wake]: set device %s\n", input_dev->name);
++    }
++#endif
+ 	}
+ 	ip->input_devs->count = dev_count;
+ 	ip->info = event_info;
+diff --git a/drivers/input/touchscreen/synaptics_3200.c b/drivers/input/touchscreen/synaptics_3200.c
+index 552a7c5..5c2299b 100644
+--- a/drivers/input/touchscreen/synaptics_3200.c
++++ b/drivers/input/touchscreen/synaptics_3200.c
+@@ -7,6 +7,7 @@
+  * License version 2, as published by the Free Software Foundation, and
+  * may be copied, distributed, and modified under those terms.
+  *
++ * Synaptics sweep2wake mods based off of showp1984's endevoru sweep2wake
+  * This program is distributed in the hope that it will be useful,
+  * but WITHOUT ANY WARRANTY; without even the implied warranty of
+  * MERCHANTABILITY or FITNESS FOR A PARTICULAR PURPOSE.  See the
+@@ -33,6 +34,10 @@
+ #include <linux/pl_sensor.h>
+ #include <linux/async.h>
+ 
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++#include <linux/ctype.h>
++#endif
++
+ #define SYN_I2C_RETRY_TIMES 10
+ #define SHIFT_BITS 10
+ #define SYN_WIRELESS_DEBUG
+@@ -143,6 +148,143 @@ struct synaptics_ts_data {
+ 
+ extern unsigned int get_tamper_sf(void);
+ 
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++#define BACK_BUTTON    112
++#define HOME_BUTTON    360
++#define MENU_BUTTON    595
++
++int s2w_switch = 1;
++int s2w_temp = 1;
++
++bool scr_suspended = false, exec_count = true, s2w_switch_changed = false;;
++bool scr_on_touch = false, led_exec_count = false, barrier[2] = {false, false};
++
++int barrier1 = 0, barrier2 = 0, barrier3 = 0, barrier4 = 0;
++
++typedef struct {
++  int  x;
++     char  name[10];
++} button;
++
++static button buttons[] = {
++      {112, "BACK"},      
++      {360, "HOME"},
++      {595, "MENU"},
++};
++        
++int s2w_startbutton = -1;
++int s2w_endbutton = -1;
++
++int sweep2wake_buttonset(const char * button_name) {
++  int i = 0;  
++  int future_button = -1;  
++  char temp_button_name[2] = "";
++  char temp_button_name_from_array[2] = "";
++
++  strncpy(temp_button_name,button_name,1);
++  temp_button_name[1] = '\0';
++
++  for (i = 0; i < sizeof(buttons)/sizeof(button); i++)
++  {
++    strncpy(temp_button_name_from_array,buttons[i].name,1);
++    temp_button_name_from_array[1] = '\0';
++
++    if (strcmp(temp_button_name,temp_button_name_from_array) == 0)
++      future_button = buttons[i].x;
++    
++    temp_button_name_from_array[0] = tolower(temp_button_name_from_array[0]);
++
++    if (strcmp(temp_button_name,temp_button_name_from_array) == 0)
++      future_button = buttons[i].x;
++  }
++
++  return future_button;
++}
++
++static struct input_dev * sweep2wake_pwrdev;
++static struct led_classdev * sweep2wake_leddev;
++static DEFINE_MUTEX(pwrlock);
++
++#ifdef CONFIG_CMDLINE_OPTIONS
++static int __init atmel_read_s2w_cmdline(char *s2w)
++{
++  if (strcmp(s2w, "2") == 0) {
++    printk(KERN_INFO "[SWEEP2WAKE]: Sweep2Wake enabled with backlight. | s2w='%s'", s2w);
++    s2w_switch = 2;
++    s2w_temp = 2;
++  } else if (strcmp(s2w, "1") == 0) {
++    printk(KERN_INFO "[SWEEP2WAKE]: Sweep2Wake enabled without backlight. | s2w='%s'", s2w);
++    s2w_switch = 1;
++    s2w_temp = 1;
++  } else if (strcmp(s2w, "0") == 0) {
++    printk(KERN_INFO "[SWEEP2WAKE]: Sweep2Wake disabled. | s2w='%s'", s2w);
++    s2w_switch = 0;
++    s2w_temp = 0;
++  } else {
++    printk(KERN_INFO "[SWEEP2WAKE]: No valid input found. Sweep2Wake disabled. | s2w='%s'", s2w);
++    s2w_switch = 0;
++    s2w_temp = 0;
++  }
++  return 1;
++}
++__setup("s2w=", atmel_read_s2w_cmdline);
++
++static int __init atmel_read_s2w_start_cmdline(char *s2w_start)
++{
++  s2w_startbutton = sweep2wake_buttonset(s2w_start);
++  if (s2w_startbutton > 0) {
++    printk(KERN_INFO "[SWEEP2WAKE]: Sweep2Wake start button set to %s. | s2w_start='%s'", s2w_start, s2w_start);
++  } else {
++    printk(KERN_INFO "[SWEEP2WAKE]: No valid input found for start button. | s2w_start='%s'", s2w_start);
++  }
++  return 1;
++}
++__setup("s2w_start=", atmel_read_s2w_start_cmdline);
++
++static int __init atmel_read_s2w_end_cmdline(char *s2w_end)
++{
++  s2w_endbutton = sweep2wake_buttonset(s2w_end);
++  if (s2w_endbutton > 0) {
++    printk(KERN_INFO "[SWEEP2WAKE]: Sweep2Wake end button set to %s. | s2w_end='%s'", s2w_end, s2w_end);
++  } else {
++    printk(KERN_INFO "[SWEEP2WAKE]: No valid input found for end button. | s2w_end='%s'", s2w_end);
++  }
++  return 1;
++}
++__setup("s2w_end=", atmel_read_s2w_end_cmdline);
++#endif
++
++extern void sweep2wake_setdev(struct input_dev * input_device) {
++        sweep2wake_pwrdev = input_device;
++        return;
++}
++EXPORT_SYMBOL(sweep2wake_setdev);
++
++extern void sweep2wake_setleddev(struct led_classdev * led_dev) {
++        sweep2wake_leddev = led_dev;
++        return;
++}
++EXPORT_SYMBOL(sweep2wake_setleddev);
++
++static void sweep2wake_presspwr(struct work_struct * sweep2wake_presspwr_work) {
++  input_event(sweep2wake_pwrdev, EV_KEY, KEY_POWER, 1);
++  input_event(sweep2wake_pwrdev, EV_SYN, 0, 0);
++  msleep(100);
++  input_event(sweep2wake_pwrdev, EV_KEY, KEY_POWER, 0);
++  input_event(sweep2wake_pwrdev, EV_SYN, 0, 0);
++  msleep(100);
++  mutex_unlock(&pwrlock);
++  return;
++}
++static DECLARE_WORK(sweep2wake_presspwr_work, sweep2wake_presspwr);
++
++void sweep2wake_pwrtrigger(void) {
++                schedule_work(&sweep2wake_presspwr_work);
++        
++        return;
++}
++#endif
++
+ static void syn_page_select(struct i2c_client *client, uint8_t page)
+ {
+ 	struct synaptics_ts_data *ts = i2c_get_clientdata(client);
+@@ -1427,6 +1569,182 @@ static ssize_t set_en_sr(struct device *dev, struct device_attribute *attr,
+ 
+ static DEVICE_ATTR(sr_en, S_IWUSR, 0, set_en_sr);
+ 
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++static ssize_t atmel_sweep2wake_show(struct device *dev,
++    struct device_attribute *attr, char *buf)
++{
++  size_t count = 0;
++
++  if (s2w_switch == s2w_temp )
++    count += sprintf(buf, "%d\n", s2w_switch);
++  else
++    count += sprintf(buf, "%d->%d\n", s2w_switch, s2w_temp);
++
++  return count;
++}
++
++static ssize_t atmel_sweep2wake_dump(struct device *dev,
++    struct device_attribute *attr, const char *buf, size_t count)
++{
++  if (buf[0] >= '0' && buf[0] <= '2' && buf[1] == '\n')
++    if (s2w_switch != buf[0] - '0') {
++      s2w_temp = buf[0] - '0';
++      if (scr_suspended == false)
++        s2w_switch = s2w_temp;
++      else 
++        s2w_switch_changed = true;
++    }
++
++  if (s2w_temp == 0) 
++    printk(KERN_INFO "[SWEEP2WAKE]: Disabled.\n");
++  else if (s2w_temp == 1)
++    printk(KERN_INFO "[SWEEP2WAKE]: Enabled without Backlight.\n");
++  else if (s2w_temp == 2)
++    printk(KERN_INFO "[SWEEP2WAKE]: Enabled with Backlight.\n");
++
++  return count;
++}
++
++static DEVICE_ATTR(sweep2wake, (S_IWUSR|S_IRUGO),
++  atmel_sweep2wake_show, atmel_sweep2wake_dump);
++
++static ssize_t atmel_sweep2wake_about_show(struct device *dev,
++    struct device_attribute *attr, char *buf)
++{
++  size_t count = 0;
++
++  count += sprintf(buf, "Thank you ShowP for sweep2wake\n");
++
++  return count;
++}
++static DEVICE_ATTR(sweep2wake_about, S_IRUGO,
++  atmel_sweep2wake_about_show, NULL);
++
++static ssize_t atmel_sweep2wake_buttons_show(struct device *dev,
++    struct device_attribute *attr, char *buf)
++{
++  int i = 0;
++  size_t count = 0;
++
++  for (i = 0; i < sizeof(buttons)/sizeof(button); i++)
++  {
++    count += sprintf(&buf[count], "%s ",buttons[i].name);
++  }
++
++  count += sprintf(&buf[count], "\n");
++
++  return count;
++}
++static DEVICE_ATTR(sweep2wake_buttons, S_IRUGO,
++  atmel_sweep2wake_buttons_show, NULL);
++
++
++static ssize_t atmel_sweep2wake_startbutton_show(struct device *dev,
++    struct device_attribute *attr, char *buf)
++{
++  int i = 0;
++  size_t count = 0;
++  bool found = false;
++
++  for (i = 0; i < sizeof(buttons)/sizeof(button); i++)
++  {
++    if (s2w_startbutton == buttons[i].x) {        
++      count += sprintf(buf, "%s\n",buttons[i].name);
++      found = true;
++    }
++  }
++  
++  if (!found) 
++    count += sprintf(buf, "%s\n","UNKNOWN");
++
++  return count;
++}
++
++static ssize_t atmel_sweep2wake_startbutton_dump(struct device *dev,
++    struct device_attribute *attr, const char *buf, size_t count)
++{
++  int s2w_tempbutton = 0;
++
++  s2w_tempbutton = sweep2wake_buttonset(buf);
++  if (s2w_tempbutton == -1)
++    return -EINVAL;;
++
++  if ( s2w_tempbutton == s2w_endbutton )
++    return count;
++
++  if ( s2w_tempbutton > s2w_endbutton ) {
++    s2w_startbutton = s2w_endbutton;  
++    s2w_endbutton = s2w_tempbutton;
++  } else 
++    s2w_startbutton = s2w_tempbutton;
++
++  barrier1 = s2w_startbutton - 100; //0;
++  barrier2 = ((s2w_endbutton - s2w_startbutton) / 4) + s2w_startbutton; //333;
++  barrier3 = (((s2w_endbutton - s2w_startbutton) / 4) * 3) + s2w_startbutton; //667;
++  barrier4 = s2w_endbutton + 100; //1000;
++
++  return count;
++}
++
++static DEVICE_ATTR(sweep2wake_startbutton, (S_IWUSR|S_IRUGO),
++  atmel_sweep2wake_startbutton_show, atmel_sweep2wake_startbutton_dump);
++
++//end button
++static ssize_t atmel_sweep2wake_endbutton_show(struct device *dev,
++    struct device_attribute *attr, char *buf)
++{
++  int i = 0;
++  size_t count = 0;
++  bool found = false;
++
++  for (i = 0; i < sizeof(buttons)/sizeof(button); i++)
++  {
++    if (s2w_endbutton == buttons[i].x) {        
++      count += sprintf(buf, "%s\n",buttons[i].name);
++      found = true;
++    }
++  }
++  
++  if (!found) 
++    count += sprintf(buf, "%s\n","UNKNOWN");
++
++  return count;
++}
++
++static ssize_t atmel_sweep2wake_endbutton_dump(struct device *dev,
++    struct device_attribute *attr, const char *buf, size_t count)
++{
++  int s2w_tempbutton = 0;
++
++  s2w_tempbutton = sweep2wake_buttonset(buf);
++  if (s2w_tempbutton == -1)
++    return -EINVAL;;
++
++  if ( s2w_tempbutton == s2w_startbutton )
++    return count;
++
++ if ( s2w_tempbutton < s2w_startbutton ) {
++    s2w_endbutton = s2w_startbutton;  
++    s2w_startbutton = s2w_tempbutton;
++  } else 
++    s2w_endbutton = s2w_tempbutton;
++
++  barrier1 = s2w_startbutton - 100; //0;
++  barrier2 = ((s2w_endbutton - s2w_startbutton) / 4) + s2w_startbutton; //333;
++  barrier3 = (((s2w_endbutton - s2w_startbutton) / 4) * 3) + s2w_startbutton; //667;
++  barrier4 = s2w_endbutton + 100; //1000;
++
++  return count;
++}
++
++static DEVICE_ATTR(sweep2wake_endbutton, (S_IWUSR|S_IRUGO),
++  atmel_sweep2wake_endbutton_show, atmel_sweep2wake_endbutton_dump);
++
++//end of end button
++
++
++#endif
++
+ static struct kobject *android_touch_kobj;
+ 
+ static int synaptics_touch_sysfs_init(void)
+@@ -1463,6 +1781,35 @@ static int synaptics_touch_sysfs_init(void)
+ 		if (sysfs_create_file(android_touch_kobj, &dev_attr_diag.attr))
+ 			return -ENOMEM;
+ 
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++    ret = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2wake.attr);
++  if (ret) {
++    printk(KERN_ERR "%s: sysfs_create_file failed\n", __func__);
++    return ret;
++  }
++  ret = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2wake_startbutton.attr);
++  if (ret) {
++    printk(KERN_ERR "%s: sysfs_create_file failed\n", __func__);
++    return ret;
++  }
++  ret = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2wake_endbutton.attr);
++  if (ret) {
++    printk(KERN_ERR "%s: sysfs_create_file failed\n", __func__);
++    return ret;
++  }
++  ret = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2wake_about.attr);
++  if (ret) {
++    printk(KERN_ERR "%s: sysfs_create_file failed\n", __func__);
++    return ret;
++  }
++  ret = sysfs_create_file(android_touch_kobj, &dev_attr_sweep2wake_buttons.attr);
++  if (ret) {
++    printk(KERN_ERR "%s: sysfs_create_file failed\n", __func__);
++    return ret;
++  }
++  
++#endif
++
+ #ifdef SYN_WIRELESS_DEBUG
+ 	ret= gpio_request(ts->gpio_irq, "synaptics_attn");
+ 	if (ret) {
+@@ -1509,6 +1856,15 @@ static void synaptics_touch_sysfs_remove(void)
+ 	sysfs_remove_file(android_touch_kobj, &dev_attr_htc_event.attr);
+ 	sysfs_remove_file(android_touch_kobj, &dev_attr_reset.attr);
+ 	sysfs_remove_file(android_touch_kobj, &dev_attr_sr_en.attr);
++
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++  sysfs_remove_file(android_touch_kobj, &dev_attr_sweep2wake.attr);
++  sysfs_remove_file(android_touch_kobj, &dev_attr_sweep2wake_startbutton.attr);
++  sysfs_remove_file(android_touch_kobj, &dev_attr_sweep2wake_endbutton.attr);  
++  sysfs_remove_file(android_touch_kobj, &dev_attr_sweep2wake_about.attr);
++  sysfs_remove_file(android_touch_kobj, &dev_attr_sweep2wake_buttons.attr);
++#endif
++
+ #ifdef SYN_WIRELESS_DEBUG
+ 	sysfs_remove_file(android_touch_kobj, &dev_attr_enabled.attr);
+ #endif
+@@ -1763,6 +2119,15 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
+ 				ts->tap_suppression = 0;
+ 			if (ts->debug_log_level & BIT(1))
+ 				printk(KERN_INFO "[TP] Finger leave\n");
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        /* if finger released, reset count & barriers */
++        if ((((ts->finger_count > 0)?1:0) == 0) && (s2w_switch > 0)) {
++          exec_count = true;
++          barrier[0] = false;
++          barrier[1] = false;
++          scr_on_touch = false;
++        }
++#endif
+ 		}
+ 
+ 		if (ts->pre_finger_data[0][0] < 2 || finger_pressed) {
+@@ -1849,6 +2214,63 @@ static void synaptics_ts_finger_func(struct synaptics_ts_data *ts)
+ 										finger_data[i][2], finger_data[i][3]);
+ 							}
+ 						}
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++
++//      printk(KERN_INFO "[SWEEP2WAKE_DEBUG]: TOUCH at x = %d\n", finger_data[i][0]);
++      //left -> right
++      if ((s2w_switch > 0) && (scr_suspended == true) && (ts->finger_count == 1)) {
++        if ((barrier[0] == true) ||
++           ((finger_data[i][0] > barrier1) &&
++            (finger_data[i][0] < barrier2) &&
++            (finger_data[i][1] > 1815))) {
++          if ((led_exec_count == true) && (scr_on_touch == false) && (s2w_switch == 2)) {
++//             pm8058_drvx_led_brightness_set(sweep2wake_leddev, 255);
++            printk(KERN_INFO "[sweep2wake]: activated button backlight.\n");
++            led_exec_count = false;
++          }
++          barrier[0] = true;
++          if ((barrier[1] == true) ||
++             ((finger_data[i][0] > barrier2) &&
++              (finger_data[i][0] < barrier3) &&
++              (finger_data[i][1] > 1815))) {
++            barrier[1] = true;
++            if ((finger_data[i][0] > barrier3) &&
++                (finger_data[i][1] > 1815)) {
++              if (exec_count) {
++                printk(KERN_INFO "[sweep2wake]: POWER ON.\n");
++                sweep2wake_pwrtrigger();
++                exec_count = false;
++                break;
++              }
++            }
++          }
++        }
++      //right -> left
++      } else if ((s2w_switch > 0) && (scr_suspended == false) && (ts->finger_count == 1)) {
++        scr_on_touch=true;
++        if ((barrier[0] == true) ||
++           ((finger_data[i][0] < barrier4) &&
++                (finger_data[i][0] > barrier3) &&
++            (finger_data[i][1] > 1815))) {
++          barrier[0] = true;
++          if ((barrier[1] == true) ||
++             ((finger_data[i][0] < barrier3) &&
++              (finger_data[i][0] > barrier2) &&
++              (finger_data[i][1] > 1815))) {
++            barrier[1] = true;
++            if ((finger_data[i][0] < barrier2) &&
++                (finger_data[i][1] > 1815)) {
++              if (exec_count) {
++                printk(KERN_INFO "[sweep2wake]: POWER OFF.\n");
++                sweep2wake_pwrtrigger();
++                exec_count = false;
++                break;
++              }
++            }
++          }
++        }
++      }
++#endif
+ 					}
+ 
+ 					if ((finger_pressed & BIT(i)) == BIT(i)) {
+@@ -2940,6 +3362,21 @@ static int synaptics_ts_probe(
+ static int synaptics_ts_remove(struct i2c_client *client)
+ {
+ 	struct synaptics_ts_data *ts = i2c_get_clientdata(client);
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_START
++  if (s2w_startbutton <= 0)
++    s2w_startbutton = sweep2wake_buttonset(CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_START);
++#endif /* CONFIG_TOUCHSCREEN_ATMEL_SWEEP2WAKE_START */
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_END
++  if (s2w_endbutton <= 0)
++    s2w_endbutton = sweep2wake_buttonset(CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE_END);
++#endif /* CONFIG_TOUCHSCREEN_ATMEL_SWEEP2WAKE_END */
++
++  barrier1 = s2w_startbutton - 100; //0;
++  barrier2 = ((s2w_endbutton - s2w_startbutton) / 4) + s2w_startbutton; //333;
++  barrier3 = (((s2w_endbutton - s2w_startbutton) / 4) * 3) + s2w_startbutton; //667;
++  barrier4 = s2w_endbutton + 100; //1000;
++#endif
+ 	unregister_early_suspend(&ts->early_suspend);
+ 	if (ts->use_irq)
+ 		free_irq(client->irq, ts);
+@@ -2968,14 +3405,33 @@ static int synaptics_ts_suspend(struct i2c_client *client, pm_message_t mesg)
+ {
+ 	int ret = 0;
+ 	struct synaptics_ts_data *ts = i2c_get_clientdata(client);
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        if (s2w_switch > 0) {
++                //screen off, enable_irq_wake
++                scr_suspended = true;
++                enable_irq_wake(client->irq);
++        }
++#endif
+ 	printk(KERN_INFO "[TP] %s: enter\n", __func__);
+ 
+ 	if (ts->use_irq) {
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++                if (s2w_switch == 0) {
++#endif
+ 		disable_irq(client->irq);
+ 		ts->irq_enabled = 0;
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++    }
++#endif
+ 	} else {
+ 		hrtimer_cancel(&ts->timer);
+ 		ret = cancel_work_sync(&ts->work);
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        if (s2w_switch == 0) {
++                if (ret && ts->use_irq) /* if work was pending disable-count is now 2 */
++                        enable_irq(client->irq);
++        }
++#endif
+ 	}
+ 
+ 	if(ts->psensor_detection) {
+@@ -3084,6 +3540,9 @@ static int synaptics_ts_suspend(struct i2c_client *client, pm_message_t mesg)
+ 	}
+ 	else if(ts->psensor_detection)
+ 		ts->psensor_phone_enable = 1;
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        if (s2w_switch == 0) {
++#endif
+ 
+ 	if (ts->packrat_number < SYNAPTICS_FW_NOCAL_PACKRAT)
+ 		printk(KERN_INFO "[TP][PWR][STATE] get power key state = %d\n", getPowerKeyState());
+@@ -3112,6 +3571,9 @@ static int synaptics_ts_suspend(struct i2c_client *client, pm_message_t mesg)
+ 		if (ts->lpm_power)
+ 			ts->lpm_power(1);
+ 	}
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        }
++#endif
+ 	return 0;
+ }
+ 
+@@ -3119,8 +3581,19 @@ static int synaptics_ts_resume(struct i2c_client *client)
+ {
+ 	int ret;
+ 	struct synaptics_ts_data *ts = i2c_get_clientdata(client);
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE  
++        if (s2w_switch > 0) {
++                //screen on, disable_irq_wake
++                scr_suspended = false;
++                disable_irq_wake(client->irq);
++        }
++#endif
+ 	printk(KERN_INFO "[TP] %s: enter\n", __func__);
+ 
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        if (s2w_switch == 0) {
++#endif
++
+ 	if (ts->power) {
+ 		ts->power(1);
+ 		msleep(100);
+@@ -3139,6 +3612,9 @@ static int synaptics_ts_resume(struct i2c_client *client)
+ 		if (ret < 0)
+ 			i2c_syn_error_handler(ts, ts->i2c_err_handler_en, "wake up", __func__);
+ 	}
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        }
++#endif
+ 
+ 	if (ts->htc_event == SYN_AND_REPORT_TYPE_A) {
+ 		if (ts->support_htc_event) {
+@@ -3165,6 +3641,9 @@ static int synaptics_ts_resume(struct i2c_client *client)
+ 			ts->psensor_phone_enable = 1;
+ 		}
+ 	}
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        if (s2w_switch == 0) {
++#endif
+ 
+ 	if (ts->use_irq) {
+ 		enable_irq(client->irq);
+@@ -3172,6 +3651,9 @@ static int synaptics_ts_resume(struct i2c_client *client)
+ 	}
+ 	else
+ 		hrtimer_start(&ts->timer, ktime_set(1, 0), HRTIMER_MODE_REL);
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++        }
++#endif
+ 
+ 	return 0;
+ }
+diff --git a/include/linux/synaptics_i2c_rmi.h b/include/linux/synaptics_i2c_rmi.h
+index 7e700ee..7c04add 100644
+--- a/include/linux/synaptics_i2c_rmi.h
++++ b/include/linux/synaptics_i2c_rmi.h
+@@ -16,6 +16,9 @@
+ 
+ #ifndef _LINUX_SYNAPTICS_I2C_RMI_H
+ #define _LINUX_SYNAPTICS_I2C_RMI_H
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++#include <linux/input.h>
++#endif
+ 
+ #define SYNAPTICS_I2C_RMI_NAME "synaptics-rmi-ts"
+ #define SYNAPTICS_T1007_NAME "synaptics-t1007"
+@@ -169,5 +172,10 @@ enum {
+ 	FUNCTION
+ };
+ 
++#ifdef CONFIG_TOUCHSCREEN_SYNAPTICS_SWEEP2WAKE
++/* Sweep2Wake */
++extern void sweep2wake_setdev(struct input_dev * input_device);
++#endif
++
+ extern uint8_t getPowerKeyState(void);
+ #endif 
+-- 
+1.8.4
+
