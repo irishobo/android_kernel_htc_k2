@@ -382,7 +382,7 @@ KBUILD_CFLAGS_MODULE  := -DMODULE
 KBUILD_LDFLAGS_MODULE := -T $(srctree)/scripts/module-common.lds
 
 # Detect if GCC 4.8+, if so add some CFLAGS
-#KBUILD_CFLAGS += $(call cc-ifversion, -ge, 48, -fno-aggressive-loop-optimizations -Wno-sizeof-pointer-memaccess)
+KBUILD_CFLAGS += $(call cc-ifversion, -ge, 48, -fno-aggressive-loop-optimizations -Wno-sizeof-pointer-memaccess)
 
 # Read KERNELRELEASE from include/config/kernel.release (if it exists)
 KERNELRELEASE = $(shell cat include/config/kernel.release 2> /dev/null)

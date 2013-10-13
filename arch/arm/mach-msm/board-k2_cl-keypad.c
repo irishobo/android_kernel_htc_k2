@@ -108,7 +108,7 @@ static struct gpio_event_info *k2_cl_keypad_info[] = {
 
 static struct gpio_event_platform_data k2_cl_keypad_data = {
 	.names = {
-		"keypad_8960",
+		"k2_cl-keypad",
 		NULL,
 	},
 	.info = k2_cl_keypad_info,
