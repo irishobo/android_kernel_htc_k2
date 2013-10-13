@@ -68,14 +68,14 @@ static void check_temp(struct work_struct *work)
 	} else
 		pr_info("msm_thermal: TSENS sensor %d (%ld C)\n",
 				tsens_dev.sensor_num, temp);
-	if (temp >= msm_thermal_info.limit_temp) {
-		max_freq = msm_thermal_info.limit_freq;
+	if (temp >= msm_thermal_info.limit_temp_degC) {
+		max_freq = msm_thermal_info.freq_step;
 #ifdef CONFIG_PERFLOCK_BOOT_LOCK
 		release_boot_lock();
 #endif
 	}
 	else if (temp <
-		msm_thermal_info.limit_temp - msm_thermal_info.temp_hysteresis)
+		msm_thermal_info.limit_temp_degC - msm_thermal_info.temp_hysteresis_degC)
 		max_freq = MSM_CPUFREQ_NO_LIMIT;
 
 	if (max_freq == limited_max_freq)
