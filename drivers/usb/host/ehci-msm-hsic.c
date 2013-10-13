@@ -101,7 +101,9 @@ static unsigned long long msm_hsic_suspend_timestamp = 0;
 static void htc_hsic_dump_system_busy_info(void)
 {
     extern unsigned long acpuclk_get_rate(int cpu);
+#ifdef CONFIG_HTC_UTIL
     extern void htc_kernel_top(void);
+#endif
     int cpu;
 
     pr_info("%s: Prepare to dump stack...\n", __func__);
@@ -112,8 +114,9 @@ static void htc_hsic_dump_system_busy_info(void)
     for_each_online_cpu(cpu)
         pr_info("cpu %d, acpuclk rate: %lu kHz\n", cpu,
             acpuclk_get_rate(cpu));
-
+#ifdef CONFIG_HTC_UTIL
     htc_kernel_top();
+#endif
 }
 
 void htc_hsic_wakeup_check(unsigned long long timestamp)
