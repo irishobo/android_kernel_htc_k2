@@ -1058,6 +1058,10 @@ choice
 		  their output to the serial port on MSM 8974 devices.
 endchoice
 
+config HTC_UTIL
+	defauly n
+	bool "HTC util driver"
+
 config HTC_BATT_CORE
 	depends on POWER_SUPPLY
 	default n
