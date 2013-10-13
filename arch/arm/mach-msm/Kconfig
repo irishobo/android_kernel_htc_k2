@@ -1059,7 +1059,7 @@ choice
 endchoice
 
 config HTC_UTIL
-	defauly n
+	default n
 	bool "HTC util driver"
 
 config HTC_BATT_CORE
